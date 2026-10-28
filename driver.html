@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1d1d1f">
+<link rel="manifest" href="/driver.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<title>Bonjib Livreur</title>
+<style>
+:root{--o:#ff6a00;--bg:#f4f4f6;--t:#1d1d1f;--m:#6b6b70;--line:#ececec}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--t);padding-bottom:env(safe-area-inset-bottom)}
+header{background:#1d1d1f;color:#fff;padding:14px 16px;font-weight:800;font-size:20px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:5}
+header small{font-weight:500;font-size:13px}
+main{max-width:560px;margin:0 auto;padding:14px}
+.card{background:#fff;border-radius:16px;padding:14px;box-shadow:0 2px 10px rgba(0,0,0,.06);margin-bottom:12px}
+.card.new{border:2px solid var(--o)}
+input{width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;font-size:18px;text-align:center;letter-spacing:4px}
+button,a.btn{font:inherit;border:0;border-radius:11px;padding:11px 14px;font-weight:700;font-size:15px;cursor:pointer;text-decoration:none;display:inline-block;text-align:center}
+.primary{background:var(--o);color:#fff}
+.sec{background:#eef0f3;color:var(--t)}
+.danger{background:#fdecea;color:#c62828}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.row>*{flex:1;min-width:110px}
+.k{color:var(--m);font-size:12px;margin-top:8px}
+.v{font-size:15px;word-break:break-word}
+.badge{display:inline-block;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:700;background:#fff3e8;color:var(--o)}
+.badge.done{background:#e8f5e9;color:#2e7d32}.badge.off{background:#eee;color:#777}
+.err{color:#c62828;font-size:14px;margin-top:10px}
+.hidden{display:none}
+.top{display:flex;justify-content:space-between;align-items:center}
+h3{margin:18px 0 8px;font-size:14px;color:var(--m);text-transform:uppercase;letter-spacing:.5px}
+</style>
+</head>
+<body>
+<header><span>BONJIB · Livreur</span><small id="gps">GPS: off</small></header>
+<main>
+
+<section id="login" class="card hidden">
+  <p style="margin:0 0 10px;font-weight:700">Code livreur</p>
+  <input id="pin" type="password" inputmode="numeric" placeholder="••••">
+  <div class="row"><button class="primary" id="loginBtn">Entrer</button></div>
+  <div class="err" id="loginErr"></div>
+</section>
+
+<section id="app" class="hidden">
+  <div class="card top">
+    <span id="summary">…</span>
+    <button class="sec" id="gpsBtn">📍 Activer GPS</button>
+  </div>
+  <div id="list"></div>
+</section>
+
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const NEXT = { nouvelle: ['acceptee', 'Accepter'], acceptee: ['recuperee', 'Récupérée'], recuperee: ['en_route', 'En route'], en_route: ['livree', 'Livrée ✔️'] };
+const LABEL = { nouvelle: 'NOUVELLE', acceptee: 'Acceptée', recuperee: 'Récupérée', en_route: 'En route', livree: 'Livrée', annulee: 'Annulée' };
+let pin = ''; try { pin = localStorage.getItem('bonjib_pin') || ''; } catch {}
+let known = new Set(), first = true, watchId = null, lastSent = 0, orders = [];
+
+const api = async (path, opts = {}) => {
+  const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', 'x-pin': pin } });
+  if (r.status === 401) { showLogin('Code incorrect'); throw new Error('401'); }
+  return r.json();
+};
+
+function showLogin(msg) {
+  $('app').classList.add('hidden'); $('login').classList.remove('hidden'); $('loginErr').textContent = msg || '';
+  try { localStorage.removeItem('bonjib_pin'); } catch {}
+}
+$('loginBtn').onclick = () => { pin = $('pin').value.trim(); try { localStorage.setItem('bonjib_pin', pin); } catch {} load(); };
+
+function beep() {
+  try {
+    const c = new (window.AudioContext || window.webkitAudioContext)(); const o = c.createOscillator(), g = c.createGain();
+    o.connect(g); g.connect(c.destination); o.frequency.value = 880; g.gain.value = .25; o.start();
+    setTimeout(() => { o.frequency.value = 1175; }, 180); setTimeout(() => { o.stop(); c.close(); }, 420);
+  } catch {}
+  if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+}
+
+const esc = (s) => String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const mapsUrl = (p) => p.lat != null ? `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(p.address)}`;
+const waNum = (t) => { let n = t.replace(/\D/g, ''); if (n.startsWith('0')) n = '212' + n.slice(1); return n; };
+
+function render() {
+  const active = orders.filter((o) => ['nouvelle', 'acceptee', 'recuperee', 'en_route'].includes(o.status));
+  const done = orders.filter((o) => !active.includes(o));
+  $('summary').textContent = active.length + ' commande(s) en cours';
+  const card = (o) => {
+    const nx = NEXT[o.status];
+    const closed = o.status === 'livree' || o.status === 'annulee';
+    return `<div class="card ${o.status === 'nouvelle' ? 'new' : ''}">
+      <div class="top"><b>${esc(o.name)}</b><span class="badge ${o.status === 'livree' ? 'done' : closed ? 'off' : ''}">${LABEL[o.status]}</span></div>
+      <div class="k">Récupération</div><div class="v">${esc(o.pickup.address)}</div>
+      <div class="k">Livraison${o.dropoff.lat != null ? ' (position GPS du client ✅)' : ''}</div><div class="v">${esc(o.dropoff.address)}</div>
+      ${o.desc ? `<div class="k">Détails</div><div class="v">${esc(o.desc)}</div>` : ''}
+      <div class="row">
+        <a class="btn sec" href="tel:${esc(o.phone)}">📞 Appeler</a>
+        <a class="btn sec" target="_blank" href="https://wa.me/${waNum(o.phone)}">WhatsApp</a>
+      </div>
+      <div class="row">
+        <a class="btn sec" target="_blank" href="${mapsUrl(o.pickup)}">🧭 Récup.</a>
+        <a class="btn sec" target="_blank" href="${mapsUrl(o.dropoff)}">🧭 Livraison</a>
+      </div>
+      ${closed ? '' : `<div class="row">${nx ? `<button class="primary" data-id="${o.id}" data-s="${nx[0]}">${nx[1]}</button>` : ''}<button class="danger" data-id="${o.id}" data-s="annulee">Annuler</button></div>`}
+    </div>`;
+  };
+  $('list').innerHTML = (active.length ? active.map(card).join('') : '<div class="card">Aucune commande pour le moment.</div>') + (done.length ? '<h3>Terminées (24h)</h3>' + done.map(card).join('') : '');
+  document.querySelectorAll('button[data-id]').forEach((b) => b.onclick = async () => {
+    if (b.dataset.s === 'annulee' && !confirm('Annuler cette commande ?')) return;
+    b.disabled = true;
+    await api(`/api/driver/orders/${b.dataset.id}/status`, { method: 'POST', body: JSON.stringify({ status: b.dataset.s }) });
+    load();
+  });
+  syncGps(active.some((o) => o.status !== 'nouvelle'));
+}
+
+async function load() {
+  if (!pin) return showLogin();
+  try {
+    const j = await api('/api/driver/orders');
+    $('login').classList.add('hidden'); $('app').classList.remove('hidden');
+    orders = j.orders;
+    const fresh = orders.filter((o) => o.status === 'nouvelle' && !known.has(o.id));
+    if (fresh.length && !first) beep();
+    orders.forEach((o) => known.add(o.id)); first = false;
+    render();
+  } catch {}
+}
+
+// ---- GPS: envoyé automatiquement tant qu'une commande est acceptée ----
+let gpsWanted = false;
+function syncGps(needed) { gpsWanted = needed; if (needed && watchId == null) startGps(); if (!needed && watchId != null) stopGps(); }
+function startGps() {
+  if (!navigator.geolocation) { $('gps').textContent = 'GPS indisponible'; return; }
+  watchId = navigator.geolocation.watchPosition((p) => {
+    $('gps').textContent = 'GPS: on 🟢';
+    const now = Date.now();
+    if (now - lastSent < 4000) return;
+    lastSent = now;
+    api('/api/driver/location', { method: 'POST', body: JSON.stringify({ lat: p.coords.latitude, lng: p.coords.longitude }) }).catch(() => {});
+  }, () => { $('gps').textContent = 'GPS refusé ⚠️'; }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
+}
+function stopGps() { navigator.geolocation.clearWatch(watchId); watchId = null; $('gps').textContent = 'GPS: off'; }
+$('gpsBtn').onclick = () => { if (watchId == null) startGps(); };
+
+// garde l'écran allumé pendant les livraisons
+let wl = null;
+document.addEventListener('visibilitychange', async () => { if (document.visibilityState === 'visible' && gpsWanted) { try { wl = await navigator.wakeLock.request('screen'); } catch {} } });
+$('gpsBtn').addEventListener('click', async () => { try { wl = await navigator.wakeLock.request('screen'); } catch {} });
+
+load(); setInterval(load, 5000);
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+</script>
+</body>
+</html>

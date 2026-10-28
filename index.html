@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#ff6a00">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<title>Bonjib - Livraison</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{--o:#ff6a00;--bg:#fff7f0;--t:#1d1d1f;--m:#6b6b70;--card:#fff;--line:#ececec}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--t);padding-bottom:env(safe-area-inset-bottom)}
+header{background:var(--o);color:#fff;padding:14px 16px;font-weight:800;font-size:22px;letter-spacing:.5px;display:flex;justify-content:space-between;align-items:center}
+header small{font-weight:500;font-size:13px;opacity:.9}
+main{max-width:520px;margin:0 auto;padding:16px}
+.card{background:var(--card);border-radius:16px;padding:16px;box-shadow:0 2px 10px rgba(0,0,0,.06);margin-bottom:14px}
+label{display:block;font-size:13px;color:var(--m);margin:12px 0 4px}
+input,textarea{width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;font-size:16px;font-family:inherit;background:#fff}
+textarea{min-height:70px;resize:vertical}
+button{font:inherit;border:0;border-radius:12px;padding:14px;font-weight:700;font-size:16px;cursor:pointer}
+.primary{background:var(--o);color:#fff;width:100%;margin-top:16px}
+.ghost{background:#fff3e8;color:var(--o);padding:9px 12px;font-size:14px;margin-top:6px}
+.err{color:#c62828;font-size:14px;margin-top:10px;min-height:18px}
+h2{margin:0 0 4px;font-size:18px}
+.sub{color:var(--m);font-size:14px;margin:0 0 6px}
+.steps{display:flex;gap:6px;margin:14px 0}
+.step{flex:1;text-align:center;font-size:11px;color:var(--m)}
+.step i{display:block;height:6px;border-radius:3px;background:var(--line);margin-bottom:6px}
+.step.on i{background:var(--o)}.step.on{color:var(--t);font-weight:700}
+#map{height:300px;border-radius:14px;margin-top:10px}
+.big{font-size:20px;font-weight:800}
+.row{display:flex;justify-content:space-between;gap:10px;font-size:14px;margin-top:8px}
+.row span:first-child{color:var(--m)}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<header><span>BONJIB</span><small>Livraison</small></header>
+<main>
+
+<section id="formView">
+  <div class="card">
+    <h2>Commander une livraison</h2>
+    <p class="sub">Kolchi kanwasslo. Remplis et on te rappelle.</p>
+
+    <label>Ton nom</label>
+    <input id="name" autocomplete="name" placeholder="Ex: Karim">
+    <label>Ton téléphone</label>
+    <input id="phone" type="tel" autocomplete="tel" placeholder="06 00 00 00 00">
+
+    <label>Adresse de récupération (où prendre la commande)</label>
+    <input id="pickup" placeholder="Ex: Marjane Hay Riad, Rabat">
+    <label>Adresse de livraison</label>
+    <input id="dropoff" placeholder="Ex: Rue 5, Hay Nahda, Rabat">
+    <button class="ghost" id="geoBtn" type="button">📍 Utiliser ma position pour la livraison</button>
+    <div class="sub" id="geoState"></div>
+
+    <label>Détails de la commande</label>
+    <textarea id="desc" placeholder="Ex: 1 sac de courses, paiement à la livraison"></textarea>
+
+    <button class="primary" id="sendBtn">Envoyer la commande</button>
+    <div class="err" id="err"></div>
+  </div>
+</section>
+
+<section id="trackView" class="hidden">
+  <div class="card">
+    <div class="big" id="statusText">…</div>
+    <div class="steps" id="steps"></div>
+    <div id="driverInfo" class="sub"></div>
+    <div id="map"></div>
+  </div>
+  <div class="card">
+    <div class="row"><span>Récupération</span><span id="tPickup"></span></div>
+    <div class="row"><span>Livraison</span><span id="tDrop"></span></div>
+    <div class="row"><span>Détails</span><span id="tDesc"></span></div>
+    <button class="ghost" id="newBtn" style="width:100%;margin-top:14px">Nouvelle commande</button>
+  </div>
+</section>
+
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const LABELS = { nouvelle: 'Commande envoyée, en attente…', acceptee: 'Commande acceptée ✅', recuperee: 'Commande récupérée 📦', en_route: 'Le livreur est en route 🛵', livree: 'Livrée ✔️ Merci !', annulee: 'Commande annulée' };
+const STEPS = [['nouvelle', 'Envoyée'], ['acceptee', 'Acceptée'], ['recuperee', 'Récupérée'], ['en_route', 'En route'], ['livree', 'Livrée']];
+let drop = { lat: null, lng: null }, timer = null, map, driverMarker, dropMarker, fitted = false;
+
+// ---- formulaire ----
+$('geoBtn').onclick = () => {
+  $('geoState').textContent = 'Recherche de ta position…';
+  navigator.geolocation.getCurrentPosition(
+    (p) => { drop = { lat: p.coords.latitude, lng: p.coords.longitude }; $('geoState').textContent = '✅ Position enregistrée (le livreur la verra sur la carte)'; },
+    () => { $('geoState').textContent = 'Impossible d\'avoir ta position. Écris juste l\'adresse.'; },
+    { enableHighAccuracy: true, timeout: 10000 });
+};
+
+$('sendBtn').onclick = async () => {
+  $('err').textContent = '';
+  $('sendBtn').disabled = true;
+  try {
+    const r = await fetch('/api/orders', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: $('name').value, phone: $('phone').value, desc: $('desc').value,
+        pickup: { address: $('pickup').value },
+        dropoff: { address: $('dropoff').value, lat: drop.lat, lng: drop.lng }
+      })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Erreur');
+    try { localStorage.setItem('bonjib_order', j.id); localStorage.setItem('bonjib_name', $('name').value); localStorage.setItem('bonjib_phone', $('phone').value); } catch {}
+    history.replaceState(null, '', '/?o=' + j.id);
+    showTrack(j.id);
+  } catch (e) { $('err').textContent = e.message; }
+  $('sendBtn').disabled = false;
+};
+
+$('newBtn').onclick = () => {
+  try { localStorage.removeItem('bonjib_order'); } catch {}
+  clearInterval(timer); history.replaceState(null, '', '/');
+  $('trackView').classList.add('hidden'); $('formView').classList.remove('hidden');
+  $('desc').value = ''; $('dropoff').value = ''; drop = { lat: null, lng: null }; $('geoState').textContent = '';
+};
+
+// ---- suivi ----
+function showTrack(id) {
+  $('formView').classList.add('hidden'); $('trackView').classList.remove('hidden');
+  fitted = false;
+  if (!map) {
+    map = L.map('map').setView([33.9716, -6.8498], 12); // Rabat par défaut
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+  }
+  setTimeout(() => map.invalidateSize(), 100);
+  clearInterval(timer);
+  const tick = () => poll(id);
+  tick(); timer = setInterval(tick, 4000);
+}
+
+async function poll(id) {
+  try {
+    const r = await fetch('/api/orders/' + id);
+    if (r.status === 404) { $('statusText').textContent = 'Commande introuvable'; clearInterval(timer); return; }
+    const o = await r.json();
+    $('statusText').textContent = LABELS[o.status] || o.status;
+    const idx = STEPS.findIndex((s) => s[0] === o.status);
+    $('steps').innerHTML = o.status === 'annulee' ? '' : STEPS.map((s, i) => `<div class="step ${i <= idx ? 'on' : ''}"><i></i>${s[1]}</div>`).join('');
+    $('tPickup').textContent = o.pickup.address; $('tDrop').textContent = o.dropoff.address; $('tDesc').textContent = o.desc || '—';
+
+    const pts = [];
+    if (o.dropoff.lat != null) {
+      const ll = [o.dropoff.lat, o.dropoff.lng]; pts.push(ll);
+      if (!dropMarker) dropMarker = L.marker(ll).addTo(map).bindPopup('Livraison');
+    }
+    if (o.driver) {
+      const ll = [o.driver.lat, o.driver.lng]; pts.push(ll);
+      const ago = Math.round((Date.now() - o.driver.at) / 1000);
+      $('driverInfo').textContent = ago < 60 ? 'Position du livreur en direct 🟢' : 'Dernière position il y a ' + Math.round(ago / 60) + ' min';
+      if (!driverMarker) driverMarker = L.marker(ll, { icon: L.divIcon({ className: '', html: '<div style="font-size:30px;line-height:30px">🛵</div>', iconSize: [30, 30], iconAnchor: [15, 15] }) }).addTo(map);
+      else driverMarker.setLatLng(ll);
+    } else { $('driverInfo').textContent = ''; }
+    if (pts.length && !fitted) { map.fitBounds(pts, { padding: [40, 40], maxZoom: 16 }); fitted = pts.length > 0 && o.driver != null; }
+    else if (o.driver && pts.length > 1) map.fitBounds(pts, { padding: [40, 40], maxZoom: 16 });
+    if (o.status === 'livree' || o.status === 'annulee') clearInterval(timer);
+  } catch {}
+}
+
+// ---- démarrage ----
+(function init() {
+  try { $('name').value = localStorage.getItem('bonjib_name') || ''; $('phone').value = localStorage.getItem('bonjib_phone') || ''; } catch {}
+  const q = new URLSearchParams(location.search).get('o');
+  let saved = null; try { saved = localStorage.getItem('bonjib_order'); } catch {}
+  const id = q || saved;
+  if (id && /^[a-f0-9]{8}$/.test(id)) showTrack(id);
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+})();
+</script>
+</body>
+</html>

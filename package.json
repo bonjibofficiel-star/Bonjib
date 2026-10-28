@@ -1,0 +1,8 @@
+{
+  "name": "bonjib",
+  "version": "1.0.0",
+  "description": "Bonjib - systeme de livraison",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
